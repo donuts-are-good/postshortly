@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -66,14 +68,18 @@ var (
 )
 
 func main() {
+	r := setupRouter()
+	loggedRouter := handlers.LoggingHandler(os.Stdout, r)
+	http.ListenAndServe(":3495", handlers.CORS()(loggedRouter))
+}
+
+func setupRouter() *mux.Router {
 	r := mux.NewRouter()
 	r.HandleFunc("/status", createStatusUpdate).Methods("POST")
 	r.HandleFunc("/status/{pubkey}", getStatusUpdatesByPubkey).Methods("GET")
 	r.HandleFunc("/status", getAllStatusUpdates).Methods("GET")
 	r.HandleFunc("/stats", getStatistics).Methods("GET")
-
-	loggedRouter := handlers.LoggingHandler(os.Stdout, r)
-	http.ListenAndServe(":3495", handlers.CORS()(loggedRouter))
+	return r
 }
 
 func createStatusUpdate(w http.ResponseWriter, r *http.Request) {
@@ -110,14 +116,19 @@ func createStatusUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func getStatusUpdatesByPubkey(w http.ResponseWriter, r *http.Request) {
-	pubkey := mux.Vars(r)["pubkey"]
+	pubkeyStr := mux.Vars(r)["pubkey"]
+	pubkey, err := hex.DecodeString(pubkeyStr)
+	if err != nil {
+		handleError(w, "Invalid public key", http.StatusBadRequest)
+		return
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
 
 	var updates []StatusUpdate
 	for _, update := range statusUpdates {
-		if string(update.Pubkey) == pubkey {
+		if bytes.Equal(update.Pubkey, pubkey) {
 			updates = append(updates, update)
 		}
 	}
