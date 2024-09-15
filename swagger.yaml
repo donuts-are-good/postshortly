@@ -1,0 +1,159 @@
+openapi: 3.0.0
+info:
+  title: postshortly API
+  description: API for posting and retrieving status updates.
+  version: 1.0.0
+  contact:
+    name: github.com/donuts-are-good
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:3495
+paths:
+  /status:
+    post:
+      summary: Create a new status update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatusUpdate'
+      responses:
+        '200':
+          description: Status update created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusUpdate'
+        '400':
+          description: Invalid request payload
+        '429': 
+          description: Rate limit exceeded
+    get:
+      summary: Get all status updates
+      responses:
+        '200':
+          description: A list of status updates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StatusUpdate'
+  /status/{pubkey}:
+    get:
+      summary: Get status updates by public key
+      parameters:
+        - name: pubkey
+          in: path
+          required: true
+          schema:
+            type: string
+            format: hex
+      responses:
+        '200':
+          description: A list of status updates for the given public key
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StatusUpdate'
+        '400': 
+          description: Invalid public key
+  /stats:
+    get:
+      summary: Get statistics
+      responses:
+        '200':
+          description: Statistics about the status updates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Statistics'
+components:
+  schemas:
+    StatusUpdate:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        timestamp:
+          type: integer
+          format: int64
+          example: 1622547800000
+        body:
+          type: string
+          example: "This is a status update"
+        link:
+          type: string
+          example: "http://example.com"
+        pubkey:
+          type: string
+          format: byte
+          example: "aabbccddeeff00112233445566778899"
+        signature:
+          type: string
+          format: byte
+          example: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+    Statistics:
+      type: object
+      properties:
+        total_posts:
+          type: integer
+          example: 100
+        unique_pubkeys:
+          type: integer
+          example: 10
+        successful_requests:
+          type: integer
+          example: 95
+        failed_requests:
+          type: integer
+          example: 5
+        total_requests:
+          type: integer
+          example: 100
+        body_max_size:
+          type: integer
+          example: 256
+        link_max_size:
+          type: integer
+          example: 256
+        pubkey_max_size:
+          type: integer
+          example: 32
+        signature_max_size:
+          type: integer
+          example: 64
+        top_prolific_pubkeys:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProlificPubkey'
+        average_posts_per_pubkey:
+          type: number
+          format: float
+          example: 10.0
+        most_recent_post_timestamp:
+          type: integer
+          format: int64
+          example: 1622547800000
+        oldest_post_timestamp:
+          type: integer
+          format: int64
+          example: 1622540000000
+        rate_limit_requests_per_second:
+          type: integer
+          example: 1
+    ProlificPubkey:
+      type: object
+      properties:
+        pubkey:
+          type: string
+          example: "aabbccddeeff00112233445566778899"
+        count:
+          type: integer
+          example: 10
