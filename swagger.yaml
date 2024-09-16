@@ -19,7 +19,32 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/StatusUpdate'
+              type: object
+              properties:
+                body:
+                  type: string
+                  example: "This is a status update"
+                  maxLength: 256
+                link:
+                  type: string
+                  example: "http://example.com"
+                  maxLength: 256
+                pubkey:
+                  type: string
+                  format: hex
+                  example: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+                  minLength: 64
+                  maxLength: 64
+                signature:
+                  type: string
+                  format: hex
+                  example: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+                  minLength: 128
+                  maxLength: 128
+              required:
+                - body
+                - pubkey
+                - signature
       responses:
         '200':
           description: Status update created successfully
@@ -84,24 +109,42 @@ components:
         timestamp:
           type: integer
           format: int64
-          example: 1622547800000
+          example: 1622547800000000000
+          description: Server-generated timestamp (nanoseconds since Unix epoch)
         body:
           type: string
           example: "This is a status update"
+          maxLength: 256
         link:
           type: string
           example: "http://example.com"
+          maxLength: 256
         pubkey:
           type: string
-          format: byte
-          example: "aabbccddeeff00112233445566778899"
+          format: hex
+          example: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+          minLength: 64
+          maxLength: 64
         signature:
           type: string
-          format: byte
-          example: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+          format: hex
+          example: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+          minLength: 128
+          maxLength: 128
+      required:
+        - body
+        - pubkey
+        - signature
     Statistics:
       type: object
       properties:
+        id:
+          type: integer
+          example: 1
+        timestamp:
+          type: integer
+          format: int64
+          example: 1622547800
         total_posts:
           type: integer
           example: 100
@@ -117,18 +160,6 @@ components:
         total_requests:
           type: integer
           example: 100
-        body_max_size:
-          type: integer
-          example: 256
-        link_max_size:
-          type: integer
-          example: 256
-        pubkey_max_size:
-          type: integer
-          example: 32
-        signature_max_size:
-          type: integer
-          example: 64
         top_prolific_pubkeys:
           type: array
           items:
@@ -140,11 +171,11 @@ components:
         most_recent_post_timestamp:
           type: integer
           format: int64
-          example: 1622547800000
+          example: 1622547800000000000
         oldest_post_timestamp:
           type: integer
           format: int64
-          example: 1622540000000
+          example: 1622540000000000000
         rate_limit_requests_per_second:
           type: integer
           example: 1
@@ -153,7 +184,8 @@ components:
       properties:
         pubkey:
           type: string
-          example: "aabbccddeeff00112233445566778899"
+          format: hex
+          example: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
         count:
           type: integer
           example: 10

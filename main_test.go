@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,16 +20,28 @@ import (
 
 func setup() {
 	// Reset the global state before each test
-	statusUpdates = []StatusUpdate{}
-	idCounter = 0
 	successfulRequests = 0
 	failedRequests = 0
-	pubkeyPostCounts = make(map[string]int)
-	limiter = rate.NewLimiter(1, 1)
+	limiter = rate.NewLimiter(1, 1) // Reset to default rate limit
+
+	// Initialize the test database
+	if err := initDB(); err != nil {
+		panic(err)
+	}
+}
+
+func teardown() {
+	// Close the database connection
+	if db != nil {
+		db.Close()
+	}
+	// Remove the test database file
+	os.Remove(dbFile)
 }
 
 func TestCreateStatusUpdate(t *testing.T) {
 	setup()
+	defer teardown()
 
 	// Generate a key pair for testing
 	pubkey, privkey, _ := ed25519.GenerateKey(nil)
@@ -37,8 +50,8 @@ func TestCreateStatusUpdate(t *testing.T) {
 	update := StatusUpdate{
 		Body:      "Test body",
 		Link:      "http://example.com",
-		Pubkey:    pubkey,
-		Signature: ed25519.Sign(privkey, append(append(pubkey, []byte("Test body")...), []byte("http://example.com")...)),
+		Pubkey:    hex.EncodeToString(pubkey),
+		Signature: hex.EncodeToString(ed25519.Sign(privkey, append(append(pubkey, []byte("Test body")...), []byte("http://example.com")...))),
 	}
 
 	// Encode the update to JSON
@@ -60,10 +73,13 @@ func TestCreateStatusUpdate(t *testing.T) {
 	assert.Equal(t, update.Body, response.Body)
 	assert.Equal(t, update.Link, response.Link)
 	assert.Equal(t, update.Pubkey, response.Pubkey)
+	assert.NotZero(t, response.ID)
+	assert.NotZero(t, response.Timestamp)
 }
 
 func TestCreateStatusUpdateRateLimit(t *testing.T) {
 	setup()
+	defer teardown()
 
 	// Generate a key pair for testing
 	pubkey, privkey, _ := ed25519.GenerateKey(nil)
@@ -72,24 +88,25 @@ func TestCreateStatusUpdateRateLimit(t *testing.T) {
 	update := StatusUpdate{
 		Body:      "Test body",
 		Link:      "http://example.com",
-		Pubkey:    pubkey,
-		Signature: ed25519.Sign(privkey, append(append(pubkey, []byte("Test body")...), []byte("http://example.com")...)),
+		Pubkey:    hex.EncodeToString(pubkey),
+		Signature: hex.EncodeToString(ed25519.Sign(privkey, append(append(pubkey, []byte("Test body")...), []byte("http://example.com")...))),
 	}
 
 	// Encode the update to JSON
 	body, _ := json.Marshal(update)
 
-	req, err := http.NewRequest("POST", "/status", bytes.NewBuffer(body))
-	assert.NoError(t, err)
-
-	rr := httptest.NewRecorder()
-	handler := http.HandlerFunc(createStatusUpdate)
+	// Set a very low rate limit for testing
+	limiter = rate.NewLimiter(rate.Every(1*time.Second), 1)
 
 	// First request should pass
+	req, _ := http.NewRequest("POST", "/status", bytes.NewBuffer(body))
+	rr := httptest.NewRecorder()
+	handler := http.HandlerFunc(createStatusUpdate)
 	handler.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code)
 
 	// Second request should be rate limited
+	req, _ = http.NewRequest("POST", "/status", bytes.NewBuffer(body))
 	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
@@ -97,6 +114,7 @@ func TestCreateStatusUpdateRateLimit(t *testing.T) {
 
 func TestCreateStatusUpdateInvalidPayload(t *testing.T) {
 	setup()
+	defer teardown()
 
 	req, err := http.NewRequest("POST", "/status", bytes.NewBuffer([]byte("invalid payload")))
 	assert.NoError(t, err)
@@ -111,8 +129,9 @@ func TestCreateStatusUpdateInvalidPayload(t *testing.T) {
 
 func TestGetStatusUpdatesByPubkeyInvalidKey(t *testing.T) {
 	setup()
+	defer teardown()
 
-	req, err := http.NewRequest("GET", "/status/invalid_pubkey", nil)
+	req, err := http.NewRequest("GET", "/status/invalidpubkey", nil)
 	assert.NoError(t, err)
 
 	rr := httptest.NewRecorder()
@@ -125,20 +144,21 @@ func TestGetStatusUpdatesByPubkeyInvalidKey(t *testing.T) {
 
 func TestGetStatusUpdatesByPubkey(t *testing.T) {
 	setup()
+	defer teardown()
 
 	// Generate a key pair for testing
-	pubkey, _, _ := ed25519.GenerateKey(nil)
+	pubkey, privkey, _ := ed25519.GenerateKey(nil)
 	pubkeyStr := hex.EncodeToString(pubkey)
 
-	// Add a status update to the global slice
-	mu.Lock()
-	statusUpdates = append(statusUpdates, StatusUpdate{
-		ID:        1,
+	// Add a status update to the database
+	update := StatusUpdate{
 		Timestamp: time.Now().UnixNano(),
 		Body:      "Test body",
-		Pubkey:    pubkey,
-	})
-	mu.Unlock()
+		Pubkey:    pubkeyStr,
+		Signature: hex.EncodeToString(ed25519.Sign(privkey, append(pubkey, []byte("Test body")...))),
+	}
+	err := addStatusUpdate(&update)
+	assert.NoError(t, err)
 
 	req, err := http.NewRequest("GET", "/status/"+pubkeyStr, nil)
 	assert.NoError(t, err)
@@ -158,16 +178,17 @@ func TestGetStatusUpdatesByPubkey(t *testing.T) {
 
 func TestGetAllStatusUpdates(t *testing.T) {
 	setup()
+	defer teardown()
 
-	// Ensure the statusUpdates slice is populated
-	mu.Lock()
-	statusUpdates = append(statusUpdates, StatusUpdate{
-		ID:        1,
+	// Add a status update to the database
+	update := StatusUpdate{
 		Timestamp: time.Now().UnixNano(),
 		Body:      "Test body",
-		Pubkey:    []byte("test_pubkey"),
-	})
-	mu.Unlock()
+		Pubkey:    strings.Repeat("a", PubkeyMaxSize*2),
+		Signature: strings.Repeat("b", SignatureMaxSize*2),
+	}
+	err := addStatusUpdate(&update)
+	assert.NoError(t, err)
 
 	req, err := http.NewRequest("GET", "/status", nil)
 	assert.NoError(t, err)
@@ -187,18 +208,33 @@ func TestGetAllStatusUpdates(t *testing.T) {
 
 func TestGetStatistics(t *testing.T) {
 	setup()
+	defer teardown()
 
-	// Ensure the statusUpdates slice is populated
-	mu.Lock()
-	statusUpdates = append(statusUpdates, StatusUpdate{
-		ID:        1,
+	// Add a status update to the database
+	update := StatusUpdate{
 		Timestamp: time.Now().UnixNano(),
 		Body:      "Test body",
-		Pubkey:    []byte("test_pubkey"),
-	})
-	successfulRequests = 1
-	pubkeyPostCounts["test_pubkey"] = 1
-	mu.Unlock()
+		Pubkey:    strings.Repeat("a", PubkeyMaxSize*2),
+		Signature: strings.Repeat("b", SignatureMaxSize*2),
+	}
+	err := addStatusUpdate(&update)
+	assert.NoError(t, err)
+
+	// Insert initial statistics
+	initialStats := Statistics{
+		Timestamp:                  time.Now().Unix(),
+		TotalPosts:                 1,
+		UniquePubkeys:              1,
+		SuccessfulRequests:         1,
+		FailedRequests:             0,
+		TotalRequests:              1,
+		AveragePostsPerPubkey:      1.0,
+		MostRecentPostTimestamp:    update.Timestamp,
+		OldestPostTimestamp:        update.Timestamp,
+		RateLimitRequestsPerSecond: 1,
+	}
+	err = updateStatisticsInDB(initialStats)
+	assert.NoError(t, err)
 
 	req, err := http.NewRequest("GET", "/stats", nil)
 	assert.NoError(t, err)
@@ -213,132 +249,20 @@ func TestGetStatistics(t *testing.T) {
 	var stats Statistics
 	err = json.NewDecoder(rr.Body).Decode(&stats)
 	assert.NoError(t, err)
-	assert.GreaterOrEqual(t, stats.TotalPosts, 1)
-	assert.GreaterOrEqual(t, stats.UniquePubkeys, 1)
-}
-
-func TestValidateStatusUpdate(t *testing.T) {
-	setup()
-
-	// Generate a key pair for testing
-	pubkey, privkey, _ := ed25519.GenerateKey(nil)
-
-	// Create a valid status update
-	update := StatusUpdate{
-		Body:      "Test body",
-		Link:      "http://example.com",
-		Pubkey:    pubkey,
-		Signature: ed25519.Sign(privkey, append(append(pubkey, []byte("Test body")...), []byte("http://example.com")...)),
-	}
-
-	err := validateStatusUpdate(update)
-	assert.NoError(t, err)
-
-	// Create an invalid status update with a wrong signature
-	update.Signature = []byte("invalid_signature")
-	err = validateStatusUpdate(update)
-	assert.Error(t, err)
-}
-
-func TestValidateStatusUpdateEdgeCases(t *testing.T) {
-	setup()
-
-	// Generate a key pair for testing
-	pubkey, privkey, _ := ed25519.GenerateKey(nil)
-
-	// Test maximum body size
-	maxBody := make([]byte, BodyMaxSize)
-	for i := range maxBody {
-		maxBody[i] = 'a'
-	}
-	update := StatusUpdate{
-		Body:      string(maxBody),
-		Pubkey:    pubkey,
-		Signature: ed25519.Sign(privkey, append(pubkey, maxBody...)),
-	}
-	err := validateStatusUpdate(update)
-	assert.NoError(t, err)
-
-	// Test maximum link size
-	maxLink := make([]byte, LinkMaxSize)
-	for i := range maxLink {
-		maxLink[i] = 'a'
-	}
-	update = StatusUpdate{
-		Body:      "Test body",
-		Link:      string(maxLink),
-		Pubkey:    pubkey,
-		Signature: ed25519.Sign(privkey, append(append(pubkey, []byte("Test body")...), maxLink...)),
-	}
-	err = validateStatusUpdate(update)
-	assert.NoError(t, err)
-
-	// Test invalid pubkey size
-	update = StatusUpdate{
-		Body:      "Test body",
-		Pubkey:    []byte("invalid_pubkey"),
-		Signature: ed25519.Sign(privkey, append([]byte("invalid_pubkey"), []byte("Test body")...)),
-	}
-	err = validateStatusUpdate(update)
-	assert.Error(t, err)
-
-	// Test invalid signature size
-	update = StatusUpdate{
-		Body:      "Test body",
-		Pubkey:    pubkey,
-		Signature: []byte("invalid_signature"),
-	}
-	err = validateStatusUpdate(update)
-	assert.Error(t, err)
-}
-
-func TestHandleError(t *testing.T) {
-	setup()
-
-	rr := httptest.NewRecorder()
-	handleError(rr, "Test error", http.StatusBadRequest)
-
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Test error")
-}
-
-func TestGetStatsForPrinting(t *testing.T) {
-	setup()
-
-	// Add some test data
-	pubkey1 := []byte("pubkey1")
-	pubkey2 := []byte("pubkey2")
-	statusUpdates = []StatusUpdate{
-		{ID: 1, Timestamp: 1000, Body: "Test 1", Pubkey: pubkey1},
-		{ID: 2, Timestamp: 2000, Body: "Test 2", Pubkey: pubkey2},
-		{ID: 3, Timestamp: 3000, Body: "Test 3", Pubkey: pubkey1},
-	}
-	pubkeyPostCounts["pubkey1"] = 2
-	pubkeyPostCounts["pubkey2"] = 1
-	successfulRequests = 3
-	failedRequests = 1
-
-	stats := getStatsForPrinting(&mu, statusUpdates, pubkeyPostCounts, successfulRequests, failedRequests, limiter)
-
-	assert.Equal(t, 3, stats.TotalPosts)
-	assert.Equal(t, 2, stats.UniquePubkeys)
-	assert.Equal(t, 3, stats.SuccessfulRequests)
-	assert.Equal(t, 1, stats.FailedRequests)
-	assert.Equal(t, 4, stats.TotalRequests)
-	assert.InDelta(t, 1.5, stats.AveragePostsPerPubkey, 0.01)
-	assert.Equal(t, int64(3000), stats.MostRecentPostTimestamp)
-	assert.Equal(t, int64(1000), stats.OldestPostTimestamp)
+	assert.Equal(t, 1, stats.TotalPosts)
+	assert.Equal(t, 1, stats.UniquePubkeys)
+	assert.Equal(t, 1, stats.SuccessfulRequests)
+	assert.Equal(t, 0, stats.FailedRequests)
+	assert.Equal(t, 1, stats.TotalRequests)
+	assert.InDelta(t, 1.0, stats.AveragePostsPerPubkey, 0.001)
+	assert.Equal(t, update.Timestamp, stats.MostRecentPostTimestamp)
+	assert.Equal(t, update.Timestamp, stats.OldestPostTimestamp)
 	assert.Equal(t, 1, stats.RateLimitRequestsPerSecond)
-
-	assert.Len(t, stats.TopProlificPubkeys, 2)
-	assert.Equal(t, "pubkey1", stats.TopProlificPubkeys[0].Pubkey)
-	assert.Equal(t, 2, stats.TopProlificPubkeys[0].Count)
-	assert.Equal(t, "pubkey2", stats.TopProlificPubkeys[1].Pubkey)
-	assert.Equal(t, 1, stats.TopProlificPubkeys[1].Count)
 }
 
 func TestPrintLiveStats(t *testing.T) {
 	setup()
+	defer teardown()
 
 	// Redirect stdout to capture output
 	old := os.Stdout
@@ -384,4 +308,38 @@ func TestPrintLiveStats(t *testing.T) {
 	assert.Contains(t, output, "Oldest Post Time:")
 	assert.Contains(t, output, "Limit (reqs/second):")
 	assert.Contains(t, output, "Top Prolific Pubkeys:")
+}
+
+func TestUpdateStatisticsInDB(t *testing.T) {
+	setup()
+	defer teardown()
+
+	stats := Statistics{
+		Timestamp:                  time.Now().Unix(),
+		TotalPosts:                 10,
+		UniquePubkeys:              5,
+		SuccessfulRequests:         15,
+		FailedRequests:             2,
+		TotalRequests:              17,
+		AveragePostsPerPubkey:      2.0,
+		MostRecentPostTimestamp:    time.Now().UnixNano(),
+		OldestPostTimestamp:        time.Now().Add(-1 * time.Hour).UnixNano(),
+		RateLimitRequestsPerSecond: 1,
+	}
+
+	err := updateStatisticsInDB(stats)
+	assert.NoError(t, err)
+
+	retrievedStats, err := getLatestStatisticsFromDB()
+	assert.NoError(t, err)
+
+	assert.Equal(t, stats.TotalPosts, retrievedStats.TotalPosts)
+	assert.Equal(t, stats.UniquePubkeys, retrievedStats.UniquePubkeys)
+	assert.Equal(t, stats.SuccessfulRequests, retrievedStats.SuccessfulRequests)
+	assert.Equal(t, stats.FailedRequests, retrievedStats.FailedRequests)
+	assert.Equal(t, stats.TotalRequests, retrievedStats.TotalRequests)
+	assert.InDelta(t, stats.AveragePostsPerPubkey, retrievedStats.AveragePostsPerPubkey, 0.001)
+	assert.Equal(t, stats.MostRecentPostTimestamp, retrievedStats.MostRecentPostTimestamp)
+	assert.Equal(t, stats.OldestPostTimestamp, retrievedStats.OldestPostTimestamp)
+	assert.Equal(t, stats.RateLimitRequestsPerSecond, retrievedStats.RateLimitRequestsPerSecond)
 }

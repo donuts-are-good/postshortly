@@ -5,6 +5,8 @@ go 1.22.0
 require (
 	github.com/gorilla/handlers v1.5.2
 	github.com/gorilla/mux v1.8.1
+	github.com/jmoiron/sqlx v1.4.0
+	github.com/mattn/go-sqlite3 v1.14.23
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/time v0.6.0

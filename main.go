@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/gorilla/handlers"
@@ -27,21 +26,23 @@ type StatusUpdate struct {
 	Timestamp int64  `json:"timestamp"`
 	Body      string `json:"body"`
 	Link      string `json:"link,omitempty"`
-	Pubkey    []byte `json:"pubkey"`
-	Signature []byte `json:"signature"`
+	Pubkey    string `json:"pubkey"`
+	Signature string `json:"signature"`
 }
 
 var (
-	statusUpdates      []StatusUpdate
-	idCounter          int
-	mu                 sync.Mutex
 	limiter            = rate.NewLimiter(1, 1)
 	successfulRequests int
 	failedRequests     int
-	pubkeyPostCounts   = make(map[string]int)
 )
 
 func main() {
+	if err := initDB(); err != nil {
+		fmt.Printf("Error initializing database: %v\n", err)
+		return
+	}
+	defer db.Close()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go printLiveStats(ctx)

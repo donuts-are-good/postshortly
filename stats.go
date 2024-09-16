@@ -4,27 +4,28 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
 )
 
 type Statistics struct {
-	TotalPosts                 int              `json:"total_posts"`
-	UniquePubkeys              int              `json:"unique_pubkeys"`
-	SuccessfulRequests         int              `json:"successful_requests"`
-	FailedRequests             int              `json:"failed_requests"`
-	TotalRequests              int              `json:"total_requests"`
+	ID                         int              `json:"id" db:"id"`
+	Timestamp                  int64            `json:"timestamp" db:"timestamp"`
+	TotalPosts                 int              `json:"total_posts" db:"total_posts"`
+	UniquePubkeys              int              `json:"unique_pubkeys" db:"unique_pubkeys"`
+	SuccessfulRequests         int              `json:"successful_requests" db:"successful_requests"`
+	FailedRequests             int              `json:"failed_requests" db:"failed_requests"`
+	TotalRequests              int              `json:"total_requests" db:"total_requests"`
+	AveragePostsPerPubkey      float64          `json:"average_posts_per_pubkey" db:"average_posts_per_pubkey"`
+	MostRecentPostTimestamp    int64            `json:"most_recent_post_timestamp" db:"most_recent_post_timestamp"`
+	OldestPostTimestamp        int64            `json:"oldest_post_timestamp" db:"oldest_post_timestamp"`
+	RateLimitRequestsPerSecond int              `json:"rate_limit_requests_per_second" db:"rate_limit_requests_per_second"`
 	BodyMaxSize                int              `json:"body_max_size"`
 	LinkMaxSize                int              `json:"link_max_size"`
 	PubkeyMaxSize              int              `json:"pubkey_max_size"`
 	SignatureMaxSize           int              `json:"signature_max_size"`
 	TopProlificPubkeys         []ProlificPubkey `json:"top_prolific_pubkeys"`
-	AveragePostsPerPubkey      float64          `json:"average_posts_per_pubkey"`
-	MostRecentPostTimestamp    int64            `json:"most_recent_post_timestamp"`
-	OldestPostTimestamp        int64            `json:"oldest_post_timestamp"`
-	RateLimitRequestsPerSecond int              `json:"rate_limit_requests_per_second"`
 }
 
 type ProlificPubkey struct {
@@ -32,22 +33,29 @@ type ProlificPubkey struct {
 	Count  int    `json:"count"`
 }
 
-func getStatistics(mu *sync.Mutex, statusUpdates []StatusUpdate, pubkeyPostCounts map[string]int, successfulRequests, failedRequests int, limiter *rate.Limiter) Statistics {
-	mu.Lock()
-	defer mu.Unlock()
+func getStatistics(successfulRequests, failedRequests int, limiter *rate.Limiter) (Statistics, error) {
+	allUpdates, err := getAllStatusUpdatesFromDB()
+	if err != nil {
+		return Statistics{}, err
+	}
+
+	pubkeyPostCounts := make(map[string]int)
+	for _, update := range allUpdates {
+		pubkeyPostCounts[string(update.Pubkey)]++
+	}
 
 	uniquePubkeys := len(pubkeyPostCounts)
 	topProlificPubkeys := getTopProlificPubkeys(pubkeyPostCounts)
 	totalRequests := successfulRequests + failedRequests
-	averagePostsPerPubkey := float64(len(statusUpdates)) / float64(uniquePubkeys)
+	averagePostsPerPubkey := float64(len(allUpdates)) / float64(uniquePubkeys)
 	var mostRecentPostTimestamp, oldestPostTimestamp int64
-	if len(statusUpdates) > 0 {
-		mostRecentPostTimestamp = statusUpdates[len(statusUpdates)-1].Timestamp
-		oldestPostTimestamp = statusUpdates[0].Timestamp
+	if len(allUpdates) > 0 {
+		mostRecentPostTimestamp = allUpdates[0].Timestamp
+		oldestPostTimestamp = allUpdates[len(allUpdates)-1].Timestamp
 	}
 
 	stats := Statistics{
-		TotalPosts:                 len(statusUpdates),
+		TotalPosts:                 len(allUpdates),
 		UniquePubkeys:              uniquePubkeys,
 		SuccessfulRequests:         successfulRequests,
 		FailedRequests:             failedRequests,
@@ -63,7 +71,7 @@ func getStatistics(mu *sync.Mutex, statusUpdates []StatusUpdate, pubkeyPostCount
 		RateLimitRequestsPerSecond: int(limiter.Limit()),
 	}
 
-	return stats
+	return stats, nil
 }
 
 func printLiveStats(ctx context.Context) {
@@ -75,7 +83,17 @@ func printLiveStats(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			stats := getStatsForPrinting(&mu, statusUpdates, pubkeyPostCounts, successfulRequests, failedRequests, limiter)
+			stats, err := getStatistics(successfulRequests, failedRequests, limiter)
+			if err != nil {
+				fmt.Printf("Error getting statistics: %v\n", err)
+				continue
+			}
+
+			// Update statistics in the database
+			err = updateStatisticsInDB(stats)
+			if err != nil {
+				fmt.Printf("Error updating statistics in database: %v\n", err)
+			}
 
 			// Clear the screen and move cursor to top-left
 			fmt.Print("\033[2J\033[H")
@@ -124,32 +142,4 @@ func getTopProlificPubkeys(pubkeyPostCounts map[string]int) []ProlificPubkey {
 	}
 
 	return topProlificPubkeys
-}
-
-func getStatsForPrinting(mu *sync.Mutex, statusUpdates []StatusUpdate, pubkeyPostCounts map[string]int, successfulRequests, failedRequests int, limiter *rate.Limiter) Statistics {
-	mu.Lock()
-	defer mu.Unlock()
-
-	uniquePubkeys := len(pubkeyPostCounts)
-	topProlificPubkeys := getTopProlificPubkeys(pubkeyPostCounts)
-	totalRequests := successfulRequests + failedRequests
-	averagePostsPerPubkey := float64(len(statusUpdates)) / float64(uniquePubkeys)
-	var mostRecentPostTimestamp, oldestPostTimestamp int64
-	if len(statusUpdates) > 0 {
-		mostRecentPostTimestamp = statusUpdates[len(statusUpdates)-1].Timestamp
-		oldestPostTimestamp = statusUpdates[0].Timestamp
-	}
-
-	return Statistics{
-		TotalPosts:                 len(statusUpdates),
-		UniquePubkeys:              uniquePubkeys,
-		SuccessfulRequests:         successfulRequests,
-		FailedRequests:             failedRequests,
-		TotalRequests:              totalRequests,
-		TopProlificPubkeys:         topProlificPubkeys,
-		AveragePostsPerPubkey:      averagePostsPerPubkey,
-		MostRecentPostTimestamp:    mostRecentPostTimestamp,
-		OldestPostTimestamp:        oldestPostTimestamp,
-		RateLimitRequestsPerSecond: int(limiter.Limit()),
-	}
 }

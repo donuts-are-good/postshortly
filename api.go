@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -40,17 +39,13 @@ func createStatusUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	idCounter++
-	update.ID = idCounter
 	update.Timestamp = time.Now().UnixNano()
-	statusUpdates = append(statusUpdates, update)
-	successfulRequests++
+	if err := addStatusUpdate(&update); err != nil {
+		handleError(w, "Error adding status update", http.StatusInternalServerError)
+		return
+	}
 
-	pubkeyStr := string(update.Pubkey)
-	pubkeyPostCounts[pubkeyStr]++
+	successfulRequests++
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(update)
@@ -58,20 +53,15 @@ func createStatusUpdate(w http.ResponseWriter, r *http.Request) {
 
 func getStatusUpdatesByPubkey(w http.ResponseWriter, r *http.Request) {
 	pubkeyStr := mux.Vars(r)["pubkey"]
-	pubkey, err := hex.DecodeString(pubkeyStr)
-	if err != nil {
+	if len(pubkeyStr) != PubkeyMaxSize*2 {
 		handleError(w, "Invalid public key", http.StatusBadRequest)
 		return
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	var updates []StatusUpdate
-	for _, update := range statusUpdates {
-		if bytes.Equal(update.Pubkey, pubkey) {
-			updates = append(updates, update)
-		}
+	updates, err := getStatusUpdatesByPubkeyFromDB(pubkeyStr)
+	if err != nil {
+		handleError(w, "Error retrieving status updates", http.StatusInternalServerError)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -79,15 +69,22 @@ func getStatusUpdatesByPubkey(w http.ResponseWriter, r *http.Request) {
 }
 
 func getAllStatusUpdates(w http.ResponseWriter, r *http.Request) {
-	mu.Lock()
-	defer mu.Unlock()
+	updates, err := getAllStatusUpdatesFromDB()
+	if err != nil {
+		handleError(w, "Error retrieving status updates", http.StatusInternalServerError)
+		return
+	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(statusUpdates)
+	json.NewEncoder(w).Encode(updates)
 }
 
 func getStatisticsHandler(w http.ResponseWriter, r *http.Request) {
-	stats := getStatistics(&mu, statusUpdates, pubkeyPostCounts, successfulRequests, failedRequests, limiter)
+	stats, err := getLatestStatisticsFromDB()
+	if err != nil {
+		handleError(w, "Error retrieving statistics", http.StatusInternalServerError)
+		return
+	}
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(stats)
@@ -98,15 +95,41 @@ func validateStatusUpdate(update StatusUpdate) error {
 	update.Body = p.Sanitize(update.Body)
 	update.Link = p.Sanitize(update.Link)
 
-	if len(update.Body) > BodyMaxSize || (update.Link != "" && len(update.Link) > LinkMaxSize) || len(update.Pubkey) != PubkeyMaxSize || len(update.Signature) != SignatureMaxSize {
-		return fmt.Errorf("invalid field sizes")
+	if update.Body == "" {
+		return fmt.Errorf("body cannot be empty")
 	}
 
-	dataToVerify := append(update.Pubkey, []byte(update.Body)...)
+	if len(update.Body) > BodyMaxSize {
+		return fmt.Errorf("body exceeds maximum size of %d characters", BodyMaxSize)
+	}
+
+	if update.Link != "" && len(update.Link) > LinkMaxSize {
+		return fmt.Errorf("link exceeds maximum size of %d characters", LinkMaxSize)
+	}
+
+	if len(update.Pubkey) != PubkeyMaxSize*2 {
+		return fmt.Errorf("invalid pubkey length")
+	}
+
+	if len(update.Signature) != SignatureMaxSize*2 {
+		return fmt.Errorf("invalid signature length")
+	}
+
+	pubkey, err := hex.DecodeString(update.Pubkey)
+	if err != nil {
+		return fmt.Errorf("invalid pubkey format")
+	}
+
+	signature, err := hex.DecodeString(update.Signature)
+	if err != nil {
+		return fmt.Errorf("invalid signature format")
+	}
+
+	dataToVerify := append(pubkey, []byte(update.Body)...)
 	dataToVerify = append(dataToVerify, []byte(update.Link)...)
 
-	if !ed25519.Verify(update.Pubkey, dataToVerify, update.Signature) {
-		return fmt.Errorf("Unauthorized")
+	if !ed25519.Verify(pubkey, dataToVerify, signature) {
+		return fmt.Errorf("unauthorized: signature verification failed")
 	}
 
 	return nil
