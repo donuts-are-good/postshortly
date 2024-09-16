@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -201,7 +204,7 @@ func TestGetStatistics(t *testing.T) {
 	assert.NoError(t, err)
 
 	rr := httptest.NewRecorder()
-	handler := http.HandlerFunc(getStatistics)
+	handler := http.HandlerFunc(getStatisticsHandler)
 
 	handler.ServeHTTP(rr, req)
 
@@ -297,4 +300,88 @@ func TestHandleError(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), "Test error")
+}
+
+func TestGetStatsForPrinting(t *testing.T) {
+	setup()
+
+	// Add some test data
+	pubkey1 := []byte("pubkey1")
+	pubkey2 := []byte("pubkey2")
+	statusUpdates = []StatusUpdate{
+		{ID: 1, Timestamp: 1000, Body: "Test 1", Pubkey: pubkey1},
+		{ID: 2, Timestamp: 2000, Body: "Test 2", Pubkey: pubkey2},
+		{ID: 3, Timestamp: 3000, Body: "Test 3", Pubkey: pubkey1},
+	}
+	pubkeyPostCounts["pubkey1"] = 2
+	pubkeyPostCounts["pubkey2"] = 1
+	successfulRequests = 3
+	failedRequests = 1
+
+	stats := getStatsForPrinting(&mu, statusUpdates, pubkeyPostCounts, successfulRequests, failedRequests, limiter)
+
+	assert.Equal(t, 3, stats.TotalPosts)
+	assert.Equal(t, 2, stats.UniquePubkeys)
+	assert.Equal(t, 3, stats.SuccessfulRequests)
+	assert.Equal(t, 1, stats.FailedRequests)
+	assert.Equal(t, 4, stats.TotalRequests)
+	assert.InDelta(t, 1.5, stats.AveragePostsPerPubkey, 0.01)
+	assert.Equal(t, int64(3000), stats.MostRecentPostTimestamp)
+	assert.Equal(t, int64(1000), stats.OldestPostTimestamp)
+	assert.Equal(t, 1, stats.RateLimitRequestsPerSecond)
+
+	assert.Len(t, stats.TopProlificPubkeys, 2)
+	assert.Equal(t, "pubkey1", stats.TopProlificPubkeys[0].Pubkey)
+	assert.Equal(t, 2, stats.TopProlificPubkeys[0].Count)
+	assert.Equal(t, "pubkey2", stats.TopProlificPubkeys[1].Pubkey)
+	assert.Equal(t, 1, stats.TopProlificPubkeys[1].Count)
+}
+
+func TestPrintLiveStats(t *testing.T) {
+	setup()
+
+	// Redirect stdout to capture output
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	// Create a context with cancel to stop printLiveStats
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Run printLiveStats in a goroutine
+	done := make(chan bool)
+	go func() {
+		printLiveStats(ctx)
+		done <- true
+	}()
+
+	// Wait for one tick of the stats refresh
+	time.Sleep(StatsRefreshInterval + 100*time.Millisecond)
+
+	// Stop printLiveStats
+	cancel()
+	<-done
+
+	// Restore stdout
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	_, err := io.Copy(&buf, r)
+	assert.NoError(t, err)
+
+	output := buf.String()
+
+	// Check for expected output
+	assert.Contains(t, output, "Live Statistics:")
+	assert.Contains(t, output, "Total Posts:")
+	assert.Contains(t, output, "Unique Pubkeys:")
+	assert.Contains(t, output, "Successful Requests:")
+	assert.Contains(t, output, "Failed Requests:")
+	assert.Contains(t, output, "Total Requests:")
+	assert.Contains(t, output, "Avg. Per Pubkey:")
+	assert.Contains(t, output, "Most Recent Post Time:")
+	assert.Contains(t, output, "Oldest Post Time:")
+	assert.Contains(t, output, "Limit (reqs/second):")
+	assert.Contains(t, output, "Top Prolific Pubkeys:")
 }

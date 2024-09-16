@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -9,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sort"
 	"sync"
 	"time"
 
@@ -20,10 +20,12 @@ import (
 )
 
 const (
-	BodyMaxSize      = 256
-	LinkMaxSize      = 256
-	PubkeyMaxSize    = ed25519.PublicKeySize
-	SignatureMaxSize = ed25519.SignatureSize
+	BodyMaxSize          = 256
+	LinkMaxSize          = 256
+	PubkeyMaxSize        = ed25519.PublicKeySize
+	SignatureMaxSize     = ed25519.SignatureSize
+	StatsRefreshInterval = 1 * time.Second
+	Port                 = 3495
 )
 
 type StatusUpdate struct {
@@ -33,28 +35,6 @@ type StatusUpdate struct {
 	Link      string `json:"link,omitempty"`
 	Pubkey    []byte `json:"pubkey"`
 	Signature []byte `json:"signature"`
-}
-
-type Statistics struct {
-	TotalPosts                 int              `json:"total_posts"`
-	UniquePubkeys              int              `json:"unique_pubkeys"`
-	SuccessfulRequests         int              `json:"successful_requests"`
-	FailedRequests             int              `json:"failed_requests"`
-	TotalRequests              int              `json:"total_requests"`
-	BodyMaxSize                int              `json:"body_max_size"`
-	LinkMaxSize                int              `json:"link_max_size"`
-	PubkeyMaxSize              int              `json:"pubkey_max_size"`
-	SignatureMaxSize           int              `json:"signature_max_size"`
-	TopProlificPubkeys         []ProlificPubkey `json:"top_prolific_pubkeys"`
-	AveragePostsPerPubkey      float64          `json:"average_posts_per_pubkey"`
-	MostRecentPostTimestamp    int64            `json:"most_recent_post_timestamp"`
-	OldestPostTimestamp        int64            `json:"oldest_post_timestamp"`
-	RateLimitRequestsPerSecond int              `json:"rate_limit_requests_per_second"`
-}
-
-type ProlificPubkey struct {
-	Pubkey string `json:"pubkey"`
-	Count  int    `json:"count"`
 }
 
 var (
@@ -68,9 +48,13 @@ var (
 )
 
 func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go printLiveStats(ctx)
 	r := setupRouter()
 	loggedRouter := handlers.LoggingHandler(os.Stdout, r)
-	http.ListenAndServe(":3495", handlers.CORS()(loggedRouter))
+	fmt.Printf("Started on port: %d\n", Port)
+	http.ListenAndServe(fmt.Sprintf(":%d", Port), handlers.CORS()(loggedRouter))
 }
 
 func setupRouter() *mux.Router {
@@ -78,7 +62,7 @@ func setupRouter() *mux.Router {
 	r.HandleFunc("/status", createStatusUpdate).Methods("POST")
 	r.HandleFunc("/status/{pubkey}", getStatusUpdatesByPubkey).Methods("GET")
 	r.HandleFunc("/status", getAllStatusUpdates).Methods("GET")
-	r.HandleFunc("/stats", getStatistics).Methods("GET")
+	r.HandleFunc("/stats", getStatisticsHandler).Methods("GET")
 	return r
 }
 
@@ -145,65 +129,11 @@ func getAllStatusUpdates(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(statusUpdates)
 }
 
-func getStatistics(w http.ResponseWriter, r *http.Request) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	uniquePubkeys := len(pubkeyPostCounts)
-	topProlificPubkeys := getTopProlificPubkeys()
-	totalRequests := successfulRequests + failedRequests
-	averagePostsPerPubkey := float64(len(statusUpdates)) / float64(uniquePubkeys)
-	var mostRecentPostTimestamp, oldestPostTimestamp int64
-	if len(statusUpdates) > 0 {
-		mostRecentPostTimestamp = statusUpdates[len(statusUpdates)-1].Timestamp
-		oldestPostTimestamp = statusUpdates[0].Timestamp
-	}
-
-	stats := Statistics{
-		TotalPosts:                 len(statusUpdates),
-		UniquePubkeys:              uniquePubkeys,
-		SuccessfulRequests:         successfulRequests,
-		FailedRequests:             failedRequests,
-		TotalRequests:              totalRequests,
-		BodyMaxSize:                BodyMaxSize,
-		LinkMaxSize:                LinkMaxSize,
-		PubkeyMaxSize:              PubkeyMaxSize,
-		SignatureMaxSize:           SignatureMaxSize,
-		TopProlificPubkeys:         topProlificPubkeys,
-		AveragePostsPerPubkey:      averagePostsPerPubkey,
-		MostRecentPostTimestamp:    mostRecentPostTimestamp,
-		OldestPostTimestamp:        oldestPostTimestamp,
-		RateLimitRequestsPerSecond: int(limiter.Limit()),
-	}
+func getStatisticsHandler(w http.ResponseWriter, r *http.Request) {
+	stats := getStatistics(&mu, statusUpdates, pubkeyPostCounts, successfulRequests, failedRequests, limiter)
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(stats)
-}
-
-func getTopProlificPubkeys() []ProlificPubkey {
-	type kv struct {
-		Key   string
-		Value int
-	}
-
-	var ss []kv
-	for k, v := range pubkeyPostCounts {
-		ss = append(ss, kv{k, v})
-	}
-
-	sort.Slice(ss, func(i, j int) bool {
-		return ss[i].Value > ss[j].Value
-	})
-
-	var topProlificPubkeys []ProlificPubkey
-	for i, kv := range ss {
-		if i >= 10 {
-			break
-		}
-		topProlificPubkeys = append(topProlificPubkeys, ProlificPubkey{Pubkey: kv.Key, Count: kv.Value})
-	}
-
-	return topProlificPubkeys
 }
 
 func validateStatusUpdate(update StatusUpdate) error {
@@ -229,4 +159,38 @@ func handleError(w http.ResponseWriter, message string, statusCode int) {
 	failedRequests++
 	http.Error(w, message, statusCode)
 	log.Printf("Error: %s, StatusCode: %d", message, statusCode)
+}
+
+func printLiveStats(ctx context.Context) {
+	ticker := time.NewTicker(StatsRefreshInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			stats := getStatsForPrinting(&mu, statusUpdates, pubkeyPostCounts, successfulRequests, failedRequests, limiter)
+
+			// Clear the screen and move cursor to top-left
+			fmt.Print("\033[2J\033[H")
+
+			// Print underlined "Live Statistics:"
+			fmt.Println("\033[4mLive Statistics:\033[0m")
+			fmt.Printf("-> Total Posts:           %d\n", stats.TotalPosts)
+			fmt.Printf("-> Unique Pubkeys:        %d\n", stats.UniquePubkeys)
+			fmt.Printf("-> Successful Requests:   %d\n", stats.SuccessfulRequests)
+			fmt.Printf("-> Failed Requests:       %d\n", stats.FailedRequests)
+			fmt.Printf("-> Total Requests:        %d\n", stats.TotalRequests)
+			fmt.Printf("-> Avg. Per Pubkey:       %.2f\n", stats.AveragePostsPerPubkey)
+			fmt.Printf("-> Most Recent Post Time: %s\n", time.Unix(0, stats.MostRecentPostTimestamp).Format("2006-01-02 03:04:05 PM"))
+			fmt.Printf("-> Oldest Post Time:      %s\n", time.Unix(0, stats.OldestPostTimestamp).Format("2006-01-02 03:04:05 PM"))
+			fmt.Printf("-> Limit (reqs/second):   %d\n", stats.RateLimitRequestsPerSecond)
+
+			fmt.Println("\nTop Prolific Pubkeys:")
+			for i, pubkey := range stats.TopProlificPubkeys {
+				fmt.Printf("%d. %s: %d posts\n", i+1, pubkey.Pubkey, pubkey.Count)
+			}
+		}
+	}
 }
