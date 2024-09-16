@@ -18,7 +18,7 @@ const (
 	LinkMaxSize          = 256
 	PubkeyMaxSize        = ed25519.PublicKeySize
 	SignatureMaxSize     = ed25519.SignatureSize
-	StatsRefreshInterval = 1 * time.Second
+	StatsRefreshInterval = 500 * time.Millisecond
 	Port                 = 3495
 )
 
