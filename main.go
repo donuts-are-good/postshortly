@@ -47,7 +47,29 @@ func main() {
 	defer cancel()
 	go printLiveStats(ctx)
 	r := setupRouter()
+
+	// Add CORS middleware
+	r.Use(corsMiddleware)
+
 	loggedRouter := handlers.LoggingHandler(os.Stdout, r)
 	fmt.Printf("Started on port: %d\n", Port)
-	http.ListenAndServe(fmt.Sprintf(":%d", Port), handlers.CORS()(loggedRouter))
+	http.ListenAndServe(fmt.Sprintf(":%d", Port), loggedRouter)
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set CORS headers
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Call the next handler
+		next.ServeHTTP(w, r)
+	})
 }
