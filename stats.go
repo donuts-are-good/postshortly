@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"golang.org/x/time/rate"
 )
@@ -61,6 +64,40 @@ func getStatistics(mu *sync.Mutex, statusUpdates []StatusUpdate, pubkeyPostCount
 	}
 
 	return stats
+}
+
+func printLiveStats(ctx context.Context) {
+	ticker := time.NewTicker(StatsRefreshInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			stats := getStatsForPrinting(&mu, statusUpdates, pubkeyPostCounts, successfulRequests, failedRequests, limiter)
+
+			// Clear the screen and move cursor to top-left
+			fmt.Print("\033[2J\033[H")
+
+			// Print underlined "Live Statistics:"
+			fmt.Println("\033[4mLive Statistics:\033[0m")
+			fmt.Printf("-> Total Posts:           %d\n", stats.TotalPosts)
+			fmt.Printf("-> Unique Pubkeys:        %d\n", stats.UniquePubkeys)
+			fmt.Printf("-> Successful Requests:   %d\n", stats.SuccessfulRequests)
+			fmt.Printf("-> Failed Requests:       %d\n", stats.FailedRequests)
+			fmt.Printf("-> Total Requests:        %d\n", stats.TotalRequests)
+			fmt.Printf("-> Avg. Per Pubkey:       %.2f\n", stats.AveragePostsPerPubkey)
+			fmt.Printf("-> Most Recent Post Time: %s\n", time.Unix(0, stats.MostRecentPostTimestamp).Format("2006-01-02 03:04:05 PM"))
+			fmt.Printf("-> Oldest Post Time:      %s\n", time.Unix(0, stats.OldestPostTimestamp).Format("2006-01-02 03:04:05 PM"))
+			fmt.Printf("-> Limit (reqs/second):   %d\n", stats.RateLimitRequestsPerSecond)
+
+			fmt.Println("\nTop Prolific Pubkeys:")
+			for i, pubkey := range stats.TopProlificPubkeys {
+				fmt.Printf("%d. %s: %d posts\n", i+1, pubkey.Pubkey, pubkey.Count)
+			}
+		}
+	}
 }
 
 func getTopProlificPubkeys(pubkeyPostCounts map[string]int) []ProlificPubkey {
